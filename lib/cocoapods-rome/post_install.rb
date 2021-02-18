@@ -13,18 +13,17 @@ def build_for_iosish_platform(sandbox, build_dir, target, device, simulator, fla
 
   spec_names = target.specs.map { |spec| [spec.root.name, spec.root.module_name] }.uniq
   spec_names.each do |root_name, module_name|
-    device_lib = "#{build_dir}/#{configuration}-#{device}/#{root_name}/#{module_name}.framework"
-    simulator_lib = "#{build_dir}/#{configuration}-#{simulator}/#{root_name}/#{module_name}.framework"
+    device_framework = "#{build_dir}/#{configuration}-#{device}/#{root_name}/#{module_name}.framework"
+    simulator_framework = "#{build_dir}/#{configuration}-#{simulator}/#{root_name}/#{module_name}.framework"
 
     if build_xcframework
-      build_xcframework([device_lib, simulator_lib], build_dir, module_name)
+      build_xcframework([device_framework, simulator_framework], build_dir, module_name)
     else
-      executable_path = "#{build_dir}/#{root_name}"
-      build_universal_framework(device_lib, simulator_lib, build_dir, executable_path, module_name)
+      build_universal_framework(device_framework, simulator_framework, build_dir, root_name, module_name)
     end
 
-    FileUtils.rm device_lib if File.file?(device_lib)
-    FileUtils.rm simulator_lib if File.file?(simulator_lib)
+    FileUtils.rm device_framework if File.file?(device_framework)
+    FileUtils.rm simulator_framework if File.file?(simulator_framework)
   end
 end
 
@@ -49,17 +48,18 @@ def xcodebuild(sandbox, target, sdk='macosx', deployment_target=nil, flags=nil, 
   Pod::Executable.execute_command 'xcodebuild', args, true
 end
 
-def build_universal_framework(device_lib, simulator_lib, build_dir, destination, module_name)
-  device_executable = "#{device_lib}/#{module_name}"
-  simulator_executable = "#{simulator_lib}/#{module_name}"
+def build_universal_framework(device_framework, simulator_framework, build_dir, root_name, module_name)
+  executable_path = "#{build_dir}/#{root_name}"
+  device_lib = "#{device_framework}/#{module_name}"
+  device_framework_lib = File.dirname(device_lib)
+  simulator_lib = "#{simulator_framework}/#{module_name}"
 
-  raise Pod::Informative, 'Framework executables were not found in the expected location.' unless File.file?(device_executable) && File.file?(simulator_executable)
+  return unless File.file?(device_lib) && File.file?(simulator_lib)
 
-  device_framework_lib = File.dirname(device_executable)
-  lipo_log = `lipo -create -output #{destination} #{device_executable} #{simulator_executable}`
-  puts lipo_log unless File.exist?(destination) 
+  lipo_log = `lipo -create -output #{executable_path} #{device_lib} #{simulator_lib}`
+  puts lipo_log unless File.exist?(executable_path)
 
-  FileUtils.mv destination, device_executable, :force => true
+  FileUtils.mv executable_path, device_lib, :force => true
   FileUtils.mv device_framework_lib, build_dir, :force => true
 end
 
@@ -103,16 +103,7 @@ end
 Pod::HooksManager.register('cocoapods-rome', :post_install) do |installer_context, user_options|
   enable_dsym = user_options.fetch('dsym', true)
   configuration = user_options.fetch('configuration', 'Debug')
-  build_xcframework = user_options.fetch('xcframework', false)
-
-  flags = [] 
-  
-  # Setting SKIP_INSTALL=NO to access the built frameworks inside the archive created
-  # instead of searching in Xcode’s default derived data folder
-  flags << "SKIP_INSTALL=NO" if build_xcframework
-
-  # Use custom flags passed via user options, if any
-  flags += user_options["flags"] if user_options["flags"]
+  xcframeworks = user_options.fetch('xcframeworks', [])
   
   if user_options["pre_compile"]
     user_options["pre_compile"].call(installer_context)
@@ -131,6 +122,15 @@ Pod::HooksManager.register('cocoapods-rome', :post_install) do |installer_contex
   build_dir.rmtree if build_dir.directory?
   targets = installer_context.umbrella_targets.select { |t| t.specs.any? }
   targets.each do |target|
+    target_name = target.cocoapods_target_label.sub('Pods-', '')
+    build_xcframework = xcframeworks.include?(target_name)
+
+    # Setting SKIP_INSTALL=NO to access the built frameworks inside the archive created
+    # instead of searching in Xcode’s default derived data folder
+    flags = ['SKIP_INSTALL=NO', 'BUILD_LIBRARY_FOR_DISTRIBUTION=YES'] 
+
+    Pod::UI.puts "Building #{target_name} as #{build_xcframework ? 'XCFrameworks' : 'universal frameworks'}"
+
     case target.platform_name
     when :ios then build_for_iosish_platform(sandbox, build_dir, target, 'iphoneos', 'iphonesimulator', flags, configuration, build_xcframework)
     when :osx then build_for_macos_platform(sandbox, build_dir, target, flags, configuration, build_xcframework)
@@ -143,9 +143,10 @@ Pod::HooksManager.register('cocoapods-rome', :post_install) do |installer_contex
 
   # Make sure the device target overwrites anything in the simulator build, otherwise iTunesConnect
   # can get upset about Info.plist containing references to the simulator SDK
-  build_type = build_xcframework ? "xcframework" : "framework"
-  frameworks = Pathname.glob("build/*/*/*.#{build_type}").reject { |f| f.to_s =~ /Pods[^.]+\.#{build_type}/ }
-  frameworks += Pathname.glob("build/*.#{build_type}").reject { |f| f.to_s =~ /Pods[^.]+\.#{build_type}/ }
+  frameworks = Pathname.glob("build/*/*/*.framework").reject { |f| f.to_s =~ /Pods[^.]+\.framework/ }
+  frameworks += Pathname.glob("build/*.framework").reject { |f| f.to_s =~ /Pods[^.]+\.framework/ }
+  frameworks += Pathname.glob("build/*/*/*.xcframework").reject { |f| f.to_s =~ /Pods[^.]+\.xcframework/ }
+  frameworks += Pathname.glob("build/*.xcframework").reject { |f| f.to_s =~ /Pods[^.]+\.xcframework/ }
 
   resources = []
 
